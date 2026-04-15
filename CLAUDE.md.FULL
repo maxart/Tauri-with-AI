@@ -1,0 +1,916 @@
+# Tauri + React Project — Claude Code Instructions
+
+## Identity
+
+You are working on a production Tauri v2 desktop application with a React + TypeScript frontend and a Rust backend. Follow modern best practices (2025+). Write clean, maintainable, type-safe, secure code on both sides of the IPC boundary. Prioritize correctness, security, and accessibility. Do not over-engineer.
+
+---
+
+## Output and Efficiency
+
+- Return code first. Explanation after, only if non-obvious.
+- No sycophantic openers, closing fluff, or restating the question.
+- No unsolicited suggestions or boilerplate beyond the requested scope.
+- Read before writing. One focused pass — avoid write-delete-rewrite cycles.
+- If unsure, say so. Never guess file paths, crate names, or Tauri APIs.
+- Code output is ASCII only (plain hyphens, straight quotes).
+- Code review: state the bug, show the fix, stop. Debugging: read first, state what/where/fix.
+- User instructions always override this file.
+
+---
+
+## Code Quality Rules
+
+### General
+
+- Write the simplest code that solves the problem. No speculative abstractions.
+- **Minimal runtime cost.** Prefer the lighter dependency when functionality is equivalent. Desktop bundle size matters — every extra MB slows downloads and updates. Check `bundlephobia.com` for npm, `cargo bloat` for Rust.
+- One React component per file. Name the file the same as the component (PascalCase). One Rust module per logical concern.
+- Keep files under 200 lines (TS/TSX) / 300 lines (Rust). If a file exceeds this, split by responsibility.
+- Do not add comments that restate the code. Only comment non-obvious "why".
+- Do not add JSDoc or doc comments to every function. Only document public APIs and complex logic.
+- Remove dead code. Do not comment it out or keep it "for reference."
+- Use `const` (TS) / `let` (Rust) by default. Only use mutable bindings when required.
+- Prefer early returns over nested conditionals.
+- Do not use `var` in TypeScript. Do not use `unsafe` in Rust without a written justification.
+- Do not use TS `enum`. Use `as const` objects or union types:
+  ```typescript
+  type Status = 'idle' | 'loading' | 'success' | 'error';
+  ```
+
+### Naming
+
+- React components: `PascalCase` (`UserProfile.tsx`)
+- React hooks: `camelCase` starting with `use` (`useAuth.ts`)
+- Utilities: `camelCase` (`formatDate.ts`)
+- Types/Interfaces: `PascalCase` (`UserProfile`, `ApiResponse`)
+- Constants: `UPPER_SNAKE_CASE` (`MAX_RETRY_COUNT`)
+- Boolean props/state: prefix with `is`, `has`, `should`, `can`
+- Event handlers: prefix with `handle`; handler props: prefix with `on`
+- Rust modules/files: `snake_case` (`window_manager.rs`)
+- Rust types/enums: `PascalCase`; functions/vars: `snake_case`; constants: `SCREAMING_SNAKE_CASE`
+- Tauri commands: `snake_case` on Rust side (`get_user_profile`); `camelCase` when invoked from JS (`getUserProfile`) — Tauri auto-converts unless `rename_all` is overridden.
+
+---
+
+## TypeScript Rules
+
+### Strictness
+
+- **Always** use `strict: true` in tsconfig. Never disable it.
+- **Never** use `any` unless interfacing with an untyped third-party library. If you must, add `// eslint-disable-next-line` with a one-line reason.
+- Use `unknown` instead of `any` when the type is genuinely unknown.
+- Enable `noImplicitAny`, `strictNullChecks`, `noUnusedParameters`, `exactOptionalPropertyTypes`.
+
+### Types and Interfaces
+
+- Use `interface` for component props (extensible). Use `type` for unions, intersections, computed types.
+- Do not use `React.FC` / `React.FunctionComponent`. Type props directly:
+  ```typescript
+  // BAD
+  const Button: React.FC<ButtonProps> = ({ label }) => { ... }
+  // GOOD
+  function Button({ label }: ButtonProps) { ... }
+  ```
+- Use `React.ReactNode` for children.
+- Use discriminated unions for state with distinct modes:
+  ```typescript
+  type FetchState =
+    | { status: 'idle' }
+    | { status: 'loading' }
+    | { status: 'success'; data: User }
+    | { status: 'error'; error: string };
+  ```
+- Implement exhaustive switch guards:
+  ```typescript
+  function assertNever(x: never): never {
+    throw new Error(`Unhandled case: ${JSON.stringify(x)}`);
+  }
+  ```
+- Leverage inference. Do not annotate what TypeScript can infer.
+
+### Shared Types Across the IPC Boundary
+
+- **Single source of truth.** Generate TS types for Tauri command payloads/responses from Rust. Use `specta` + `tauri-specta`, or `ts-rs` to emit types at build time.
+  ```rust
+  // BAD — hand-maintained duplicate types drift between Rust and TS
+  #[tauri::command]
+  fn get_user(id: u64) -> User { ... }
+  // ...then manually written `interface User` in TS that goes stale
+
+  // GOOD — derive TS type from Rust
+  #[derive(serde::Serialize, specta::Type)]
+  pub struct User { pub id: u64, pub name: String }
+  ```
+- Keep shared enums as TS union literals, not TS `enum`. They serialize cleanly from Rust `serde`-tagged enums.
+- If not using code generation, keep shared types in `src/bindings/` and audit them in every PR that touches a command.
+
+---
+
+## Rust (Backend) Rules
+
+### Toolchain
+
+- **Always** use stable Rust. Pin via `rust-toolchain.toml`.
+- Enable lints in `Cargo.toml` or `src-tauri/src/lib.rs`:
+  ```
+  #![warn(clippy::all, clippy::pedantic)]
+  #![deny(unsafe_code)]
+  ```
+- Run `cargo clippy -- -D warnings` in CI. Run `cargo fmt --check`.
+
+### Error Handling
+
+- Use `thiserror` for typed errors in the command layer. Use `anyhow` only for top-level scripts — not for command return types.
+- **Commands that can fail MUST return `Result<T, E>` where `E: serde::Serialize`.** Tauri cannot serialize `std::io::Error`, `sqlx::Error`, etc. directly.
+  ```rust
+  // BAD — std error types don't implement Serialize; won't compile as a command
+  #[tauri::command]
+  fn read_config() -> Result<Config, std::io::Error> { ... }
+
+  // GOOD — typed error with a Serialize impl
+  #[derive(Debug, thiserror::Error)]
+  pub enum AppError {
+      #[error("io: {0}")] Io(#[from] std::io::Error),
+      #[error("parse: {0}")] Parse(String),
+      #[error("unauthorized")] Unauthorized,
+  }
+  impl serde::Serialize for AppError {
+      fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+          s.serialize_str(&self.to_string())
+      }
+  }
+  #[tauri::command]
+  async fn read_config() -> Result<Config, AppError> { ... }
+  ```
+- Never `.unwrap()` / `.expect()` in command handlers — panics crash the backend thread and surface as opaque errors.
+- Log internals via `tracing`/`log`; return a sanitized error variant. Never leak file paths, stack traces, or sensitive data.
+
+### Async
+
+- Use `tokio` (Tauri uses it). Mark async commands `async fn`. Use `#[tauri::command(async)]` only to bridge a sync function onto the async runtime.
+- **Never block the runtime.** No `std::thread::sleep`, no blocking fs/HTTP in async commands. Use `tokio::fs`, `tokio::time::sleep`, `reqwest`, or wrap blocking work in `tokio::task::spawn_blocking`.
+
+### Ownership, Safety, Performance
+
+- Prefer owned types (`String`, `Vec<T>`) in command signatures — borrows don't cross the IPC boundary; serialization owns.
+- Avoid cloning large payloads. Derive `Clone`/`Debug`/`Serialize` only when needed — not every type needs every derive.
+- Validate all command inputs at the top of the handler (lengths, ranges, path traversal). **Treat frontend input as untrusted.**
+
+---
+
+## Tauri IPC Rules
+
+### Commands (Rust → exposed to JS)
+
+- Register commands explicitly in the builder:
+  ```rust
+  tauri::Builder::default()
+      .invoke_handler(tauri::generate_handler![cmd_a, cmd_b])
+      .run(tauri::generate_context!())
+      .expect("error while running tauri application");
+  ```
+- Keep commands small and focused. Each command does one thing.
+- **Always** return `Result<T, E>` when failure is possible. Never return `Option<T>` to signal errors — use `Result` with a typed `NotFound` variant.
+- Do not pass giant payloads over IPC. Large blobs (images, file contents) serialize slowly. For files, return a path and read via the `fs` plugin (with scoped permissions) or stream via a channel.
+
+### Channels (Rust → JS streaming)
+
+- For progress, logs, or large/streamed data, use the Tauri v2 `Channel<T>` API — not events. Channels are typed and ordered.
+  ```rust
+  // GOOD — streaming progress updates with a typed channel
+  use tauri::ipc::Channel;
+
+  #[tauri::command]
+  async fn download(url: String, on_progress: Channel<u64>) -> Result<(), AppError> {
+      // on_progress.send(bytes)? on each chunk
+      Ok(())
+  }
+  ```
+- Channels outperform events for high-frequency data and avoid the global event bus.
+
+### Events (lightweight pub/sub)
+
+- Use events for low-frequency broadcast messages (window focus, global refresh). Never for high-frequency or type-critical data.
+- Always unlisten on unmount:
+  ```typescript
+  // BAD — listener leaks across remounts; each remount doubles handlers
+  useEffect(() => { listen('app://update', handler); }, []);
+
+  // GOOD — cleanup calls the returned unlisten
+  useEffect(() => {
+    const p = listen('app://update', handler);
+    return () => { p.then(fn => fn()); };
+  }, []);
+  ```
+- Scope to a window (`window.emit` / `window.listen`) instead of the global bus when possible.
+
+### Frontend Invocation
+
+- **Wrap `invoke` in typed functions — never call `invoke('cmd_name', ...)` directly in components.**
+  ```typescript
+  // BAD — stringly typed, no safety, errors scattered across the app
+  const user = await invoke('get_user', { id });
+
+  // GOOD — typed wrapper in src/ipc/
+  export async function getUser(id: number): Promise<User> {
+    return invoke<User>('get_user', { id });
+  }
+  ```
+- Put every invocation wrapper in `src/ipc/` (or `src/bindings/` for generated). This is your API layer — same discipline as an HTTP client.
+- Handle errors at the call site with try/catch. Tauri rejects the promise with the serialized error variant.
+
+---
+
+## Tauri Security Rules (Non-Negotiable)
+
+### Capabilities and Permissions (v2 ACL)
+
+- Tauri v2 replaces the v1 allowlist with a **capability/permission** system. Capabilities are JSON/TOML files in `src-tauri/capabilities/` that grant named permissions to specific windows.
+- **Principle of least privilege.** Grant only the permissions a window actually needs.
+  ```json
+  // BAD — granting blanket filesystem access
+  { "permissions": ["fs:default", "fs:allow-read-all", "fs:allow-write-all"] }
+
+  // GOOD — scoped, specific permissions
+  {
+    "identifier": "main-capability",
+    "windows": ["main"],
+    "permissions": [
+      "core:default",
+      { "identifier": "fs:allow-read-text-file", "allow": [{ "path": "$APPCONFIG/*.json" }] }
+    ]
+  }
+  ```
+- One capability file per logical window or feature. Reference them by identifier in `tauri.conf.json`.
+- Do not add permissions "just in case." If a command is not needed on a given window, do not enable it there.
+- On Linux/Android, Tauri cannot distinguish an embedded iframe from the main window — be deliberate about remote content.
+
+### Content Security Policy
+
+- **Always** configure a strict CSP in `tauri.conf.json` under `app.security.csp`. Tauri injects nonces/hashes at build time for your own scripts and styles.
+  ```json
+  "csp": "default-src 'self'; img-src 'self' asset: https://asset.localhost; connect-src ipc: http://ipc.localhost"
+  ```
+- **Never** use `unsafe-inline` or `unsafe-eval` in CSP. If a dependency requires it, replace the dependency.
+- Allow `connect-src ipc: http://ipc.localhost` (required for Tauri IPC), and only the specific external origins you actually call.
+
+### Isolation Pattern
+
+- For apps with significant third-party frontend code (rich text editors, charting libs, iframes), enable the **isolation pattern** — a sandboxed iframe between frontend and core that can validate/transform IPC messages before they reach Rust.
+  ```json
+  "pattern": { "use": "isolation", "options": { "dir": "../dist-isolation" } }
+  ```
+
+### General Hardening
+
+- **Validate every command input in Rust.** Do not trust the frontend — it is a compromised environment the moment an attacker injects a script.
+- **Never** pass user input directly into shell commands, SQL queries, or filesystem paths without validation and canonicalization (prevents path traversal).
+- **Never** hardcode secrets (API keys, tokens) in the frontend bundle. Store them in the OS keychain via the `stronghold` or `keyring` crate / plugin.
+- Keep `withGlobalTauri: false` (the default) unless you have a specific reason — prevents exposing `window.__TAURI__` broadly.
+- Audit dependencies: `cargo audit` and `npm audit` in CI. Treat critical/high as blockers.
+
+---
+
+## Tauri State Management Rules
+
+Tauri lets you share Rust state across commands via `Manager::manage` and inject it into handlers with `State<T>`.
+
+- Register state once at startup:
+  ```rust
+  // GOOD
+  tauri::Builder::default()
+      .manage(AppState { db: Mutex::new(pool) })
+      .invoke_handler(tauri::generate_handler![...])
+  ```
+- **You do not need `Arc`** around managed state — Tauri wraps it. You still need interior mutability (`Mutex`, `RwLock`, `tokio::sync::Mutex`) if you mutate.
+- Use `tokio::sync::Mutex` for state held across `.await`; use `std::sync::Mutex` for short sync critical sections only.
+  ```rust
+  // BAD — std::sync::Mutex held across await blocks the runtime
+  let g = state.mutex.lock().unwrap(); some_async_op().await;
+  // GOOD — async-aware mutex
+  let g = state.mutex.lock().await;   some_async_op().await;
+  ```
+- Keep critical sections minimal. Copy or move data out, release the lock, then do work.
+- Inject state into commands via `tauri::State`:
+  ```rust
+  #[tauri::command]
+  async fn save(state: tauri::State<'_, AppState>, input: String) -> Result<(), AppError> {
+      let mut db = state.db.lock().await;
+      db.execute(&input).await?;
+      Ok(())
+  }
+  ```
+
+---
+
+## React Component Rules
+
+- Keep components focused on a single responsibility.
+- Prefer composition over configuration — pass `children` and element props, not config objects:
+  ```tsx
+  // BAD
+  <Card title="Profile" icon="user" headerAction="edit" onHeaderAction={handleEdit} showBorder />
+  // GOOD
+  <Card>
+    <Card.Header><UserIcon /><h2>Profile</h2><Button onClick={handleEdit}>Edit</Button></Card.Header>
+    <Card.Body>{children}</Card.Body>
+  </Card>
+  ```
+- Extract logic into custom hooks when a component does too much.
+- Place derived values inline during render — never store them in state.
+
+### Props
+
+- Do not pass more than 5-7 props. Group related props or split the component.
+- Always destructure props in the function signature with default values.
+- Never spread unknown props onto DOM elements unless building a design-system primitive.
+
+### Conditional Rendering
+
+- Early returns for loading/error states. Avoid nested ternaries:
+  ```tsx
+  if (loading) return <Spinner />;
+  if (error) return <Error message={error.message} />;
+  return <Profile user={user} />;
+  ```
+- Never `{count && <X />}` when `count` can be `0` — use `count > 0 && <X />`.
+
+### Lists
+
+- Use a stable unique `key` (`item.id`). Never use array index for dynamic lists — reorder/filter breaks component state.
+
+---
+
+## Frontend State Management Rules
+
+### Decision Tree
+
+1. **Server/IPC data** (from Tauri commands) → SWR or TanStack Query. **NEVER** copy into `useState`.
+2. **Local UI state** → `useState`
+3. **Complex local state** → `useReducer`
+4. **Shared state (2+ components)** → lift first; if 2+ levels of drilling, use React Context
+5. **App-wide complex state** → Zustand (preferred for Tauri apps — small footprint, no provider)
+6. **Persistent state** → Tauri `store` plugin or OS keychain, **not** `localStorage` for sensitive data
+
+### Principles
+
+- Keep state as local as possible.
+- Never store derived values in state:
+  ```typescript
+  // BAD
+  const [items, setItems] = useState([]);
+  const [filtered, setFiltered] = useState([]);
+  useEffect(() => setFiltered(items.filter(...)), [items]);
+
+  // GOOD
+  const filtered = items.filter(...);
+  ```
+- Use the functional form when updating state based on the previous value: `setCount(prev => prev + 1)`.
+- Wrap every Context consumer in a custom hook with a null-check, and memoize the Context value.
+
+---
+
+## Data Fetching Rules (IPC + HTTP)
+
+- **Always** route IPC calls through a data-fetching library. Tauri commands benefit from the same caching/dedup/revalidation that HTTP calls do.
+  ```typescript
+  // BAD — raw invoke inside useEffect; no caching, race conditions
+  useEffect(() => { invoke('get_users').then(setUsers); }, []);
+
+  // GOOD — SWR wrapping a typed IPC function
+  const { data: users, error, isLoading } = useSWR('users', () => getUsers());
+
+  // GOOD — TanStack Query
+  const { data: users } = useQuery({ queryKey: ['users'], queryFn: getUsers });
+  ```
+- Use conditional fetching for parameterized queries:
+  ```typescript
+  useQuery({ queryKey: ['user', id], queryFn: () => getUser(id), enabled: !!id });
+  ```
+- Configure sensible defaults: `staleTime` ~5 min; disable retry for deterministic errors.
+- Create typed wrapper hooks per command — do not call SWR/Query directly in components.
+- For HTTP requests from the backend, use Rust `reqwest` via a command — **not** `fetch()` from the frontend when you need CORS bypass, custom headers, or to keep tokens out of the webview.
+
+---
+
+## React Hooks Rules
+
+### useEffect
+
+- **Only for synchronizing with external systems** (Tauri events, DOM listeners, timers, third-party libs).
+- **NEVER** use for deriving state, transforming data for render, or handling user events.
+- **Always** clean up subscriptions, listeners, and Tauri event listens:
+  ```typescript
+  useEffect(() => {
+    let cancelled = false;
+    const unlisten = listen('app://tick', () => { if (!cancelled) doThing(); });
+    return () => { cancelled = true; unlisten.then(fn => fn()); };
+  }, []);
+  ```
+- Include all deps. Never suppress the ESLint rule — restructure the code.
+- Be aware of StrictMode double-invocation in dev. If an effect breaks, you're missing cleanup.
+
+### useMemo / useCallback
+
+- Only where there's a measurable benefit or a memoized child requires it.
+- If on React 19+ with the React Compiler enabled, manual memoization is generally unnecessary.
+
+### Custom Hooks
+
+- Extract when logic repeats in 2+ components, improves readability, or needs independent testing.
+- Single responsibility. Descriptive names (`useUserPermissions`, not `useData`).
+- For 3+ similar IPC hooks, extract a factory: `const useUser = createIpcHook({ cmd: 'get_user', key: 'user' })`.
+
+---
+
+## Error Handling Rules
+
+### Frontend
+
+- **Always** add Error Boundaries. Non-negotiable:
+  ```tsx
+  import { ErrorBoundary } from 'react-error-boundary';
+
+  <ErrorBoundary FallbackComponent={ErrorFallback} onError={reportToSentry}>
+    <MainContent />
+  </ErrorBoundary>
+  ```
+  - App-level: catastrophic failures
+  - Feature-level: isolate crashes (sidebar crash does not kill main content)
+  - List-item-level: one bad item does not collapse the list
+- Use `react-error-boundary` (not hand-rolled class components).
+- Provide recovery actions (retry, reload, navigate home).
+- Try/catch in event handlers and async functions — boundaries do not catch these:
+  ```typescript
+  // BAD
+  async function handleSave() { await saveUser(data); toast.success('Saved'); }
+
+  // GOOD
+  async function handleSave() {
+    try {
+      await saveUser(data);
+      toast.success('Saved');
+    } catch (e) {
+      toast.error(e instanceof IpcError ? e.message : 'Save failed');
+    }
+  }
+  ```
+- Wrap IPC errors in a typed class for consistent handling:
+  ```typescript
+  export class IpcError extends Error {
+    constructor(public code: string, message: string) { super(message); }
+  }
+  ```
+- Never surface raw error objects or stack traces to users.
+
+### Backend
+
+- Return `Result<T, AppError>` from commands (see Rust Rules).
+- Log internals (`tracing`), return sanitized variants.
+- On panic in non-command code, let the app crash visibly in debug and report via the updater/Sentry in release — don't silently swallow.
+
+---
+
+## Performance Rules
+
+### Frontend — Mandatory
+
+- **Route-level code splitting** with `React.lazy` + `Suspense`:
+  ```typescript
+  const Settings = lazy(() => import('./pages/Settings'));
+  ```
+- Keep the initial bundle small. Desktop users download your app once, but every feature they don't see at startup should be lazy.
+
+### Frontend — Apply When Relevant
+
+- `React.memo` on list-item components and components that re-render due to parent state they don't consume.
+- `useMemo` for expensive filtering/sorting on large arrays.
+- Debounce rapid input (search, resize): 200-500 ms.
+- `useTransition` for non-urgent updates.
+
+### Frontend — Do NOT
+
+- Wrap every component in `React.memo` or every value in `useMemo`.
+- Prematurely optimize. Correct first, fast second.
+
+### Backend / IPC
+
+- **Minimize IPC payload size.** Every command roundtrip serializes JSON. Large payloads (>100 KB) are noticeably slow.
+- Use `Channel<T>` for streaming/progress, not repeated `emit` calls.
+- Do CPU-heavy work in Rust, not JavaScript. That's a primary reason you chose Tauri.
+- Move blocking I/O off the main thread. Use `tokio::task::spawn_blocking` for sync crates.
+- Keep `Mutex` critical sections small.
+
+---
+
+## Styling Rules
+
+### If Using Tailwind CSS
+
+- Use `clsx` + `tailwind-merge`; create a `cn()` utility:
+  ```typescript
+  import { twMerge } from 'tailwind-merge';
+  import clsx, { type ClassValue } from 'clsx';
+  export function cn(...inputs: ClassValue[]) { return twMerge(clsx(inputs)); }
+  ```
+- Sort classes with `prettier-plugin-tailwindcss`.
+- Use `@apply` sparingly — only for truly reusable base styles.
+
+### If Using CSS Modules
+
+- Name files `Component.module.css` colocated with the component.
+- Use `camelCase` class names.
+- No global styles except a single `global.css` entry point.
+
+### General
+
+- Do not use runtime CSS-in-JS (styled-components, Emotion) in new projects. Use zero-runtime solutions (Tailwind, CSS Modules, Vanilla Extract).
+- Use inline `style` only for truly dynamic values (`style={{ width: `${percent}%` }}`).
+- Use CSS custom properties for theme values, not JS constants.
+
+### Platform Theming
+
+- Respect OS theme (light/dark) via `window.matchMedia('(prefers-color-scheme: dark)')` or the `os` plugin.
+- Match platform conventions: traffic-light spacing on macOS, accent color on Windows. Don't ship a website-looking app to desktop users.
+
+---
+
+## Accessibility Rules (Non-Negotiable)
+
+- Use **semantic HTML**: `<button>` for actions, `<a>` for navigation, `<nav>`, `<main>`, `<header>`, `<footer>`.
+- **Never** `<div onClick>` for interactive elements:
+  ```tsx
+  // BAD
+  <div onClick={handleClick} className="btn">Submit</div>
+  // GOOD
+  <button onClick={handleClick}>Submit</button>
+  ```
+- Every `<img>` has `alt` (empty for decorative).
+- Every interactive element is keyboard accessible (Tab, Enter, Escape, Arrows).
+- Every icon-only button has `aria-label`.
+- Every form input has an associated `<label>` via `htmlFor`, or `aria-label`.
+- Use a headless UI library for complex interactive components (modals, dropdowns, tabs). Do not build from scratch:
+
+  | Library | Style | Best For |
+  |---|---|---|
+  | **Headless UI** | Unstyled hooks/components | Tailwind projects, minimal footprint |
+  | **Radix UI** | Unstyled primitives | Maximum flexibility, excellent docs |
+  | **Ark UI** | Unstyled state machines | Framework-agnostic |
+  | **React Aria** | Hooks only | Most comprehensive a11y (Adobe) |
+  | **shadcn/ui** | Pre-styled (Tailwind + Radix) | Rapid development |
+- Install and enforce `eslint-plugin-jsx-a11y` (recommended config).
+- Use `useId()` for linking labels to inputs.
+- Test with keyboard only, then with a screen reader (VoiceOver on macOS, NVDA on Windows).
+
+---
+
+## Frontend Security Rules (Non-Negotiable)
+
+- **NEVER** use `dangerouslySetInnerHTML` with user-provided content. If unavoidable, sanitize with DOMPurify.
+- Enforce `react/no-danger: 'error'` in ESLint.
+- Use `react-markdown` for user-generated rich text.
+- Validate and constrain all user inputs (max length, allowed characters) on both frontend and Rust side.
+- **Never** store auth tokens / secrets in `localStorage` or `sessionStorage`. Use the OS keychain via a Rust command backed by `stronghold`, `keyring`, or `tauri-plugin-stronghold`.
+- **Never** put API keys or secrets in the frontend bundle — Tauri bundles them into the installer, which users can inspect.
+- **Never** interpolate user input into `href` (prevents `javascript:` URL attacks).
+- Keep external `connect-src` origins in CSP to the minimum you actually call.
+
+---
+
+## Project Structure Rules
+
+### Top-Level Layout
+
+```
+tauri-app/
+  src/                         # React frontend
+    app/                       # app shell, providers, router
+    pages/                     # route-level page components
+      FeatureName/
+        components/
+        hooks/
+    components/                # shared reusable UI
+    hooks/
+      data/                    # SWR/Query wrappers around IPC
+    ipc/                       # typed invoke wrappers, one file per domain
+    bindings/                  # generated TS types (specta / ts-rs)
+    lib/                       # utilities (cn, formatters, etc.)
+    styles/
+    typings/
+  src-tauri/
+    src/
+      main.rs                  # thin entrypoint, just calls lib::run()
+      lib.rs                   # builder setup, command registration
+      commands/
+        mod.rs
+        user.rs                # one file per command domain
+        window.rs
+      error.rs                 # AppError + Serialize impl
+      state.rs                 # AppState struct
+      plugins/                 # internal plugin modules (if any)
+    capabilities/
+      default.json
+      main-window.json
+    icons/
+    tauri.conf.json
+    Cargo.toml
+    build.rs
+  package.json
+  vite.config.ts
+  tsconfig.json
+```
+
+### Organization Principles
+
+- **Colocate** feature-specific code within its feature directory.
+- **Promote** to top-level (`src/hooks/`, `src/components/`) only when shared by 2+ features.
+- One component per file; one hook per file.
+- Keep barrel files (`index.ts`) small (under 15 exports). Prefer direct imports for large projects.
+- Enforce `import/no-cycle: 'error'`.
+- Use `simple-import-sort`.
+- Use path aliases (`@/components`, `@/ipc`, `@/hooks`).
+- In Rust, expose only what's needed from each module; prefer `pub(crate)` over `pub`.
+
+---
+
+## Testing Rules
+
+### Frontend Tests
+
+- Use **Vitest** (Vite projects) or Jest.
+- Use **React Testing Library** for component tests.
+- Mock Tauri APIs with `@tauri-apps/api/mocks` — do not launch a webview for unit tests:
+  ```typescript
+  import { mockIPC } from '@tauri-apps/api/mocks';
+  mockIPC((cmd, args) => {
+    if (cmd === 'get_user') return { id: 1, name: 'Alice' };
+    throw new Error(`unexpected command ${cmd}`);
+  });
+  ```
+- Test **behavior**, not implementation. Assert what the user sees.
+- Query by **role** first (`getByRole`), then label, then text. `getByTestId` is a last resort.
+- Use `userEvent`, not `fireEvent`.
+- No snapshot tests except for very stable UI.
+
+### Backend Tests
+
+- Co-locate unit tests with `#[cfg(test)] mod tests`.
+- For command integration tests, use Tauri's mock runtime (`tauri::test::mock_builder` / `mock_context(noop_assets())`) — no native webview required.
+- Use `mockall` for trait mocks; avoid mocking concrete structs.
+
+### End-to-End Tests
+
+- Use **WebDriver** via `tauri-driver` (Linux + Windows; macOS is unsupported as of 2025 due to missing WKWebView driver). For critical macOS flows, rely on integration tests + manual smoke tests.
+- Alternatives: `playwright` against a running dev server for frontend-only flows.
+- Test the critical path (the one flow that must never break) and cross-page navigation.
+
+### Coverage
+
+- Every project must have tests. `passWithNoTests: true` is a red flag.
+- CI must run: frontend tests (Vitest), Rust unit tests (`cargo test`), and a build smoke test.
+
+---
+
+## Tauri Plugins Rules
+
+- Prefer **official plugins** (`tauri-apps/plugins-workspace`) over hand-rolling. They handle edge cases across platforms you won't think of.
+- Common official plugins:
+  - `tauri-plugin-fs` — filesystem access (scoped via capabilities)
+  - `tauri-plugin-dialog` — open/save dialogs
+  - `tauri-plugin-shell` — open URLs, run sidecars (narrowly scoped)
+  - `tauri-plugin-opener` — open files/URLs in default app (replaces most `shell.open` cases)
+  - `tauri-plugin-os` — OS info
+  - `tauri-plugin-store` — persistent key-value store (non-sensitive)
+  - `tauri-plugin-sql` — SQLite/MySQL/Postgres via `sqlx`
+  - `tauri-plugin-updater` — in-app updates
+  - `tauri-plugin-notification` — system notifications
+  - `tauri-plugin-window-state` — persist window size/position
+  - `tauri-plugin-single-instance` — prevent multiple running instances
+  - `tauri-plugin-stronghold` / community `keyring` — secure secret storage
+  - `tauri-plugin-log` — file/console logging
+  - `tauri-plugin-deep-link` — handle `myapp://` URLs
+- **Always** grant plugin permissions explicitly in capabilities; never enable a plugin's `allow-*` permissions globally if you only need one.
+- Pin plugin versions to the same Tauri major (e.g., `2.x`). Mismatched majors will not build.
+- When writing a custom plugin, follow the official template; do not reinvent permission wiring.
+
+---
+
+## Build, Bundle, and Distribution Rules
+
+### Configuration
+
+- Keep `tauri.conf.json` minimal and committed. Derived values belong in `build.rs` or env vars.
+- Set a stable `identifier` (reverse-DNS, e.g., `com.acme.myapp`) **before first release**. Changing it later breaks OS integrations (notifications, autolaunch, app data paths).
+- Version in `tauri.conf.json` and `Cargo.toml` must match. Consider a release script that updates both.
+- `beforeDevCommand` / `beforeBuildCommand` must run the frontend build; `frontendDist` points at the build output (e.g., `../dist`).
+
+### Updater
+
+- Use `tauri-plugin-updater`. **Signatures are mandatory** — you cannot ship unsigned updates.
+- Generate the updater key pair once: `npx @tauri-apps/cli signer generate`. Store the **private key** as a CI secret (`TAURI_SIGNING_PRIVATE_KEY`). **Losing it means you can never publish updates to existing installs.** Losing it to an attacker means they can.
+- The public key lives in `tauri.conf.json`. The private key never goes in the repo.
+- Host the `latest.json` manifest at a stable URL (GitHub Releases, S3, or CrabNebula Cloud).
+- Gate updater logic behind explicit user consent in production (prompt before installing).
+
+### Code Signing and Notarization
+
+- **macOS:** Developer ID Application certificate + notarization are required. Without them, Gatekeeper blocks the app on every machine but the developer's. Use App Store Connect API keys for CI-based notarization.
+  - Tauri's WebView requires `com.apple.security.cs.allow-jit` and `com.apple.security.cs.allow-unsigned-executable-memory` entitlements; without them the app crashes on launch after notarization.
+- **Windows:** Authenticode signing. Azure Trusted Signing or a hardware token (EV cert) is standard for production.
+- **Linux:** AppImage / .deb / .rpm; signing is optional but recommended (GPG).
+- **Never** check signing certs/keys into the repo. Use CI secrets.
+- Automate with GitHub Actions (Tauri provides an official action). A single tag push signs and ships all platforms.
+
+### Environment Variables
+
+- Vite frontend env vars: prefix with `VITE_` to expose to the bundle. Unprefixed vars are build-time only.
+- Commit `.env.example`; never `.env` with secrets.
+- **Never** put secrets in `VITE_*` vars — they end up in the shipped installer.
+
+### Bundle Size
+
+- Track `src-tauri/target/release/bundle` sizes across releases. Budget regressions.
+- Run `cargo bloat` and `vite-bundle-visualizer` periodically.
+- Strip debug symbols in release: `[profile.release] strip = true, lto = true, codegen-units = 1`.
+- Never ship source maps to production unless served behind auth — they expose the source of your desktop app.
+
+### CI/CD Guardrails
+
+- **Do not modify** CI files (`.github/workflows/`) without explicit user approval.
+- **Do not add** `--no-verify`, `--force`, or skip flags to CI.
+- CI must run: `tsc --noEmit`, `eslint .`, frontend tests, `cargo clippy -- -D warnings`, `cargo fmt --check`, `cargo test`, and a release `tauri build` smoke test on each supported platform matrix (at minimum macOS + Windows + Linux).
+
+---
+
+## Tooling Rules
+
+### Required
+
+- **TypeScript** strict mode
+- **ESLint** with:
+  - `typescript-eslint/recommendedTypeChecked`
+  - `eslint-plugin-react`, `eslint-plugin-react-hooks`
+  - `eslint-plugin-jsx-a11y` (recommended config)
+  - `eslint-plugin-simple-import-sort`
+  - `eslint-plugin-import` (with `no-cycle: 'error'`)
+- **Prettier** for formatting
+- **Husky** + **lint-staged** for pre-commit gates (runs both frontend and `cargo fmt`/`clippy` on Rust changes)
+- **Rust**: `clippy`, `rustfmt`, `cargo-deny` (or `cargo-audit`)
+
+### ESLint Rules to Enforce
+
+```
+react/no-danger: error
+react/jsx-no-bind: warn (disable if using React Compiler)
+import/no-cycle: error
+simple-import-sort/imports: error
+no-console: [warn, { allow: [warn, error] }]
+```
+
+### Recommended
+
+- `vite-plugin-checker` for in-browser TS/ESLint overlay
+- `prettier-plugin-tailwindcss`
+- React DevTools + SWR/Query DevTools (dev only)
+- `tracing-subscriber` on the Rust side for structured logs
+
+---
+
+## Large Project Maintenance Rules
+
+### Dependencies
+
+- Run `npm audit` and `cargo audit` monthly or in CI. Treat critical/high as blockers.
+- One major bump per PR so regressions are traceable.
+- Pin majors in `package.json` and `Cargo.toml`; commit lockfiles (`package-lock.json`, `Cargo.lock`).
+- Remove unused deps: `npx depcheck` (JS) and `cargo machete` (Rust).
+
+### Dead Code
+
+- Delete unused components, hooks, commands, and feature flags whose rollout is complete.
+- Enable `noUnusedLocals` / `noUnusedParameters`. Run `ts-unused-exports` and `cargo +nightly udeps` periodically.
+
+### Refactoring
+
+- **Only refactor when explicitly asked** or when required to complete the task safely.
+- Scope tightly. A refactor PR does one thing.
+- Ensure tests exist **before** refactoring. Write them first if they don't.
+- Flag tech debt to the user; do not silently fix it.
+
+### Incremental Migration
+
+- Migrate patterns incrementally (never big-bang). Old and new can coexist temporarily.
+- Document the canonical pattern in this file: "New commands MUST use `AppError`; do not add new `anyhow::Result`-returning commands."
+
+### Performance Budgets
+
+- Enforce bundle size limits with `size-limit` (frontend); track Rust binary size in CI.
+- Monitor app startup and steady-state memory in production (telemetry).
+- Check `bundlephobia.com` before adding npm deps. Prefer smaller: `date-fns`/`dayjs` over `moment`; native JS over `lodash`; `fetch` over `axios`; `crypto.randomUUID()` over `uuid`; `clsx` over `classnames`; SWR/TanStack Query over Apollo.
+
+---
+
+## When Creating a New Tauri + React Project
+
+1. `npm create tauri-app@latest` → choose React + TypeScript + Vite
+2. Enable `strict: true` in `tsconfig.json`
+3. Install ESLint + plugins listed above
+4. Install Prettier + `prettier-plugin-tailwindcss` (if using Tailwind)
+5. Set up Husky + lint-staged (cover both `*.{ts,tsx}` and `*.rs`)
+6. Install a data-fetching library (SWR or TanStack Query)
+7. Install `react-error-boundary` and a headless UI library (Radix / Headless UI / shadcn)
+8. Create the directory structure above (`src/ipc/`, `src-tauri/src/commands/`, etc.)
+9. Add `thiserror` and create `AppError` with a `Serialize` impl
+10. Set up `tauri-specta` or `ts-rs` to generate shared types
+11. Configure a **strict CSP** and minimal **capabilities** in `tauri.conf.json` / `capabilities/`
+12. Install the plugins you actually need — no "might be useful later"
+13. Generate updater keys (`signer generate`), store private key as CI secret
+14. Decide `identifier` (reverse-DNS) — change is disruptive later
+15. Set up CI matrix: macOS + Windows + Linux build + test
+16. Add at least one integration test (mocked IPC) for the critical path
+17. Add Error Boundaries at app and feature levels
+18. Commit `.env.example`
+
+---
+
+## When Working on an Existing Tauri + React Project
+
+Before making changes:
+
+1. **Read** the relevant files first — both frontend and `src-tauri/` sides. IPC contracts are the fragile part.
+2. **Follow** existing conventions in the codebase, even if they differ from these rules. Consistency within a project beats theoretical best practices.
+3. **Do not refactor** code unrelated to your task. A bug fix does not need surrounding code cleaned up.
+4. **Do not add** types, comments, or docs to code you did not change.
+5. **Do not introduce** new libraries, plugins, or capabilities without explicit user approval.
+6. **Match** existing naming, file organization, and style.
+7. **Audit capabilities** before adding a command: does an existing capability allow it, or do you need a new one?
+8. **Test** both sides: run frontend tests + `cargo test` before claiming done.
+9. **Run `cargo clippy -- -D warnings`** and `tsc --noEmit` before committing.
+
+---
+
+## Checklist Before Completing Any Task
+
+- [ ] TypeScript compiles with zero errors (`npx tsc --noEmit`)
+- [ ] ESLint passes with zero errors (`npx eslint .`)
+- [ ] Frontend tests pass (`npm test`)
+- [ ] Rust compiles with zero warnings (`cargo build`)
+- [ ] `cargo clippy -- -D warnings` passes
+- [ ] `cargo fmt --check` passes
+- [ ] Rust tests pass (`cargo test`)
+- [ ] Release build succeeds (`npm run tauri build`) at least once since the last dependency change
+- [ ] New commands return `Result<T, AppError>` and are registered in `generate_handler!`
+- [ ] New commands have explicit permissions in capabilities — not blanket `allow-*`
+- [ ] No `unsafe` in Rust without a written justification
+- [ ] No `.unwrap()`/`.expect()` in command handlers
+- [ ] No `any` in TypeScript without justification
+- [ ] No unsanitized `dangerouslySetInnerHTML`
+- [ ] CSP unchanged (or tightened, never loosened) without a reason
+- [ ] No secrets / tokens / API keys in the frontend bundle
+- [ ] New IPC calls wrapped in a typed function in `src/ipc/`
+- [ ] New Tauri event listeners have cleanup on unmount
+- [ ] New interactive elements are keyboard accessible
+- [ ] New images have alt text
+- [ ] List items use stable unique keys
+- [ ] No commented-out code
+- [ ] No `console.log` / `dbg!` left in production code
+- [ ] No hardcoded API URLs — env vars used
+- [ ] No CI/CD files modified without approval
+- [ ] New deps justified (size checked; no smaller alternative)
+
+---
+
+## Project-Specific Overrides
+
+<!--
+Customize this section for your specific project. Examples:
+
+### State Management
+- Global state uses Zustand; server/IPC state uses TanStack Query with 10-minute staleTime.
+
+### Styling
+- Tailwind with the shadcn/ui primitives. No CSS Modules.
+
+### IPC
+- All commands live under src-tauri/src/commands/<domain>.rs
+- All typed wrappers live in src/ipc/<domain>.ts and are auto-generated via tauri-specta
+- New commands require a matching capability entry reviewed in PR
+
+### Database
+- SQLite via tauri-plugin-sql; migrations live in src-tauri/migrations/ and run at startup
+
+### Updater
+- Manifest at https://releases.example.com/latest.json
+- Private key stored as TAURI_SIGNING_PRIVATE_KEY in GitHub Actions secrets
+
+### Testing
+- Frontend: Vitest + RTL, mocked IPC via @tauri-apps/api/mocks
+- Backend: cargo test with tauri::test::mock_builder
+- Minimum 70% line coverage on new TS code; new Rust commands require a unit test
+
+### Distribution
+- macOS: Developer ID + notarization via apple-codesign in CI
+- Windows: Azure Trusted Signing
+- Linux: AppImage + .deb, GPG-signed
+-->
