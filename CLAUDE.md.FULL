@@ -1,5 +1,7 @@
 # Tauri + React Project — Claude Code Instructions
 
+_Origin: https://github.com/maxart/Tauri-with-AI — check upstream for newer versions of this file._
+
 ## Identity
 
 You are working on a production Tauri v2 desktop application with a React + TypeScript frontend and a Rust backend. Follow modern best practices (2025+). Write clean, maintainable, type-safe, secure code on both sides of the IPC boundary. Prioritize correctness, security, and accessibility. Do not over-engineer.
